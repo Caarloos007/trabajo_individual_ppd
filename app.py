@@ -2,6 +2,9 @@ import threading
 import queue
 import random
 import time
+import csv
+import json
+import io
 from dataclasses import dataclass, field
 from typing import Dict, List
 from collections import defaultdict
@@ -27,7 +30,6 @@ st.set_page_config(
 
 CONFIG = {
     "total_aficionados": 500,
-    "aforo_maximo": 450,
     "num_puertas": 4,
     "tornos_por_puerta": 3,
     "tiempo_control_min": 0.005,
@@ -56,13 +58,6 @@ CONFIG["total_aficionados"] = st.sidebar.slider(
     100,
     5000,
     CONFIG["total_aficionados"]
-)
-
-CONFIG["aforo_maximo"] = st.sidebar.slider(
-    "Aforo máximo",
-    50,
-    CONFIG["total_aficionados"],
-    CONFIG["aforo_maximo"]
 )
 
 CONFIG["num_puertas"] = st.sidebar.slider(
@@ -131,13 +126,10 @@ def ajustar_ejes(ax, datos, margen=0.10, minimo=1):
 @dataclass
 class EstadoEstadio:
 
-    aforo_maximo: int
-
     dentro: int = 0
     rechazados: int = 0
     duplicados: int = 0
     tarde: int = 0
-    aforo_completo: int = 0
 
     procesados_puerta: Dict[str, int] = field(default_factory=dict)
     tiempos_espera: Dict[str, list] = field(default_factory=lambda: defaultdict(list))
@@ -174,13 +166,6 @@ class EstadoEstadio:
                 return "DUPLICADO"
 
         with self.lock_global:
-
-            if self.dentro >= self.aforo_maximo:
-
-                self.aforo_completo += 1
-                self.procesados_puerta[puerta] += 1
-
-                return "AFORO"
 
             self.dentro += 1
             self.procesados_puerta[puerta] += 1
@@ -351,7 +336,7 @@ def worker_puerta(
 
 def simular_concurrente(aficionados, cfg):
 
-    estado = EstadoEstadio(cfg["aforo_maximo"])
+    estado = EstadoEstadio()
 
     estado.inicializar_puertas(NOMBRES_PUERTAS)
 
@@ -437,7 +422,7 @@ def simular_concurrente(aficionados, cfg):
 
 def simular_secuencial(aficionados, cfg):
 
-    estado = EstadoEstadio(cfg["aforo_maximo"])
+    estado = EstadoEstadio()
 
     estado.inicializar_puertas(["Única"])
 
@@ -507,6 +492,36 @@ if st.button("Ejecutar simulación"):
     )
 
     st.success("Simulación completada")
+
+    # Preparar datos para exportación
+    datos_export = {
+        "metricas": {
+            "entraron": estado_conc.dentro,
+            "invalidas": estado_conc.rechazados,
+            "duplicadas": estado_conc.duplicados,
+            "llegaron_tarde": estado_conc.tarde,
+            "tiempo_secuencial": t_seq,
+            "tiempo_concurrente": t_conc,
+            "aceleracion": t_seq / t_conc if t_conc > 0 else 0
+        },
+        "procesados_por_puerta": estado_conc.procesados_puerta,
+        "tiempos_espera_por_puerta": {puerta: tiempos for puerta, tiempos in estado_conc.tiempos_espera.items()},
+        "estadisticas_avanzadas": {}
+    }
+
+    esperas_ms = [
+        t * 1000
+        for lista in estado_conc.tiempos_espera.values()
+        for t in lista
+    ]
+
+    if esperas_ms:
+        datos_export["estadisticas_avanzadas"] = {
+            "media": np.mean(esperas_ms),
+            "mediana": np.median(esperas_ms),
+            "p95": np.percentile(esperas_ms, 95),
+            "maximo": np.max(esperas_ms)
+        }
 
     # ══════════════════════════════════════════
     # MÉTRICAS
@@ -748,4 +763,47 @@ if st.button("Ejecutar simulación"):
         c4.metric(
             "Máximo",
             f"{np.max(esperas_ms):.2f} ms"
+        )
+
+    # ══════════════════════════════════════════
+    # EXPORTAR RESULTADOS
+    # ══════════════════════════════════════════
+
+    st.subheader("Exportar resultados")
+
+    col_csv, col_json = st.columns(2)
+
+    with col_csv:
+        # Crear CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Métrica", "Valor"])
+        for key, value in datos_export["metricas"].items():
+            writer.writerow([key, value])
+        writer.writerow([])
+        writer.writerow(["Puerta", "Procesados"])
+        for puerta, num in datos_export["procesados_por_puerta"].items():
+            writer.writerow([puerta, num])
+        if datos_export["estadisticas_avanzadas"]:
+            writer.writerow([])
+            writer.writerow(["Estadística", "Valor (ms)"])
+            for key, value in datos_export["estadisticas_avanzadas"].items():
+                writer.writerow([key, value])
+        csv_data = output.getvalue()
+        output.close()
+
+        st.download_button(
+            label="Descargar CSV",
+            data=csv_data,
+            file_name="resultados_simulacion.csv",
+            mime="text/csv"
+        )
+
+    with col_json:
+        json_data = json.dumps(datos_export, indent=4, ensure_ascii=False)
+        st.download_button(
+            label="Descargar JSON",
+            data=json_data,
+            file_name="resultados_simulacion.json",
+            mime="application/json"
         )
